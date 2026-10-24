@@ -13,6 +13,7 @@ evaluate.py - يقيس النظام بنفس pipeline التطبيق (detector -
 import argparse
 import os
 import random
+from collections import Counter
 
 import cv2
 import numpy as np
@@ -104,9 +105,39 @@ def find_eer(dists, labels):
     return (fpr[i] + fnr[i]) / 2, -thr[i], fpr, tpr
 
 
+def summarize(y_true, y_pred):
+    """FAR: غرباء قُبلوا | FRR: مسجّلون رُفضوا أو عُرِّفوا خطأً (نسب على مستوى الصورة)"""
+    unk = [p for t, p in zip(y_true, y_pred) if t == "Unknown"]
+    enr = [(t, p) for t, p in zip(y_true, y_pred) if t != "Unknown"]
+    far = sum(p != "Unknown" for p in unk) / max(1, len(unk))
+    frr = sum(p != t for t, p in enr) / max(1, len(enr))
+    return far, frr
+
+
+def sweep_thresholds(probes, db, thresholds):
+    rows = []
+    for thr in thresholds:
+        y_true, y_pred = run_identification(probes, db, thr)
+        far, frr = summarize(y_true, y_pred)
+        rows.append((float(thr), accuracy_score(y_true, y_pred), far, frr))
+    return rows
+
+
+def pick_threshold(rows):
+    """يقلل (FAR + FRR) على مجموعة التحقق؛ عند التعادل يأخذ وسط المجال."""
+    best = min(far + frr for _, _, far, frr in rows)
+    cands = [thr for thr, _, far, frr in rows if far + frr <= best + 1e-9]
+    return round(float(np.median(cands)), 3)
+
+
 def report(title, y_true, y_pred, names):
     print(f"\n===== {title} =====")
     print(f"Overall Accuracy: {accuracy_score(y_true, y_pred):.4f}")
+    far, frr = summarize(y_true, y_pred)
+    print(f"FAR (strangers accepted): {far:.4f} | FRR (enrolled rejected/misidentified): {frr:.4f}")
+    wrong = Counter(p for t, p in zip(y_true, y_pred) if t == "Unknown" and p != "Unknown")
+    if wrong:
+        print("Strangers accepted as:", dict(wrong.most_common(5)))
     print(classification_report(
         y_true, y_pred, labels=names + ["Unknown"], zero_division=0))
 
@@ -162,14 +193,22 @@ def main():
     print(f"\nEnrolled: {len(enrolled)} people | Unknown: {len(unknown_people)} people")
     print(f"Validation probes: {len(val_probes)} | Test probes: {len(test_probes)}")
 
-    # ضبط الـ threshold على مجموعة التحقق فقط
+    # ضبط الـ threshold على مجموعة التحقق فقط (بنفس FaceMatcher، لا على مستوى الأزواج)
+    thresholds = np.round(np.arange(0.20, 0.701, 0.01), 2)
+    rows = sweep_thresholds(val_probes, db, thresholds)
+    tuned = pick_threshold(rows)
+    print("\n[Validation] threshold sweep")
+    for thr, acc, far, frr in rows[::5]:
+        print(f"  thr={thr:.2f}  acc={acc:.3f}  FAR={far:.3f}  FRR={frr:.3f}")
+    print(f"[Validation] chosen threshold = {tuned:.3f} (minimizes FAR + FRR)")
+
     d_val, l_val = verification_scores(val_probes, db)
     eer, eer_thr, _, _ = find_eer(d_val, l_val)
-    print(f"\n[Validation] EER = {eer:.4f} at threshold = {eer_thr:.3f}")
+    print(f"[Validation] pair-level EER = {eer:.4f} at {eer_thr:.3f} (reference only)")
 
     # النتائج النهائية على مجموعة الاختبار
     for title, thr in [(f"Test @ current threshold ({args.threshold})", args.threshold),
-                       (f"Test @ tuned threshold ({eer_thr:.3f})", eer_thr)]:
+                       (f"Test @ tuned threshold ({tuned:.3f})", tuned)]:
         y_true, y_pred = run_identification(test_probes, db, thr)
         report(title, y_true, y_pred, enrolled)
 
