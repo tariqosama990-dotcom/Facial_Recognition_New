@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Biometric / personal data - never commit
+face_embeddings.pkl
+dataset/
+eval_data/
+eval_lfw/
+eval_real/
+
+# Generated outputs
+roc.png
